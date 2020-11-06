@@ -22,7 +22,7 @@ use std::ptr::NonNull;
 
 const DUMPS_DOC: &str =
     "dumps(obj, /, default=None, option=None)\n--\n\nSerialize Python objects to JSON.\0";
-const LOADS_DOC: &str = "loads(obj, /)\n--\n\nDeserialize JSON to Python objects.\0";
+const LOADS_DOC: &str = "loads(obj, /, lists_as_tuples=False/)\n--\n\nDeserialize JSON to Python objects.\0";
 
 macro_rules! opt {
     ($mptr:expr, $name:expr, $opt:expr) => {
@@ -89,12 +89,31 @@ pub unsafe extern "C" fn PyInit_orjson() -> *mut PyObject {
         )
     };
 
-    let wrapped_loads = PyMethodDef {
-        ml_name: "loads\0".as_ptr() as *const c_char,
-        ml_meth: Some(loads),
-        ml_flags: METH_O,
-        ml_doc: LOADS_DOC.as_ptr() as *const c_char,
-    };
+    let wrapped_loads: PyMethodDef;
+    
+    #[cfg(python37)]
+    {
+        wrapped_loads = PyMethodDef {
+            ml_name: "loads\0".as_ptr() as *const c_char,
+            ml_meth: Some(unsafe {
+                std::mem::transmute::<crate::ffi::_PyCFunctionFastWithKeywords, PyCFunction>(loads)
+            }),
+            ml_flags: pyo3::ffi::METH_FASTCALL | METH_KEYWORDS,
+            ml_doc: LOADS_DOC.as_ptr() as *const c_char,
+        };
+    }
+
+    #[cfg(not(python37))]
+    {
+        wrapped_loads = PyMethodDef {
+            ml_name: "loads\0".as_ptr() as *const c_char,
+            ml_meth: Some(unsafe {
+                std::mem::transmute::<PyCFunctionWithKeywords, PyCFunction>(loads)
+            }),
+            ml_flags: METH_VARARGS | METH_KEYWORDS,
+            ml_doc: LOADS_DOC.as_ptr() as *const c_char,
+        };
+    }
 
     unsafe {
         PyModule_AddObject(
@@ -183,13 +202,7 @@ fn raise_dumps_exception(msg: Cow<str>) -> *mut PyObject {
     std::ptr::null_mut()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn loads(_self: *mut PyObject, obj: *mut PyObject) -> *mut PyObject {
-    match crate::deserialize::deserialize(obj) {
-        Ok(val) => val.as_ptr(),
-        Err(err) => raise_loads_exception(Cow::Owned(err)),
-    }
-}
+
 
 #[cfg(python37)]
 #[no_mangle]
@@ -324,5 +337,123 @@ pub unsafe extern "C" fn dumps(
     match crate::serialize::serialize(PyTuple_GET_ITEM(args, 0), default, optsbits as opt::Opt) {
         Ok(val) => val.as_ptr(),
         Err(err) => raise_dumps_exception(Cow::Owned(err)),
+    }
+}
+
+
+#[cfg(python37)]
+#[no_mangle]
+pub unsafe extern "C" fn loads(
+    _self: *mut PyObject,
+    args: *const *mut PyObject,
+    nargs: Py_ssize_t,
+    kwnames: *mut PyObject,
+) -> *mut PyObject {
+    
+    let mut lists_as_tuples: Option<NonNull<PyObject>> = None;
+
+    let num_args = pyo3::ffi::PyVectorcall_NARGS(nargs as isize);
+    if unlikely!(num_args == 0) {
+        return raise_dumps_exception(Cow::Borrowed(
+            "loads() missing 1 required positional argument: 'obj'",
+        ));
+    }
+    if num_args & 2 == 2 {
+        lists_as_tuples = Some(NonNull::new_unchecked(*args.offset(1)));
+    }
+    if !kwnames.is_null() {
+        for i in 0..=PyTuple_GET_SIZE(kwnames) - 1 {
+            let arg = PyTuple_GET_ITEM(kwnames, i as Py_ssize_t);
+            if arg == typeref::LISTS_AS_TUPLES {
+                if unlikely!(num_args & 2 == 2) {
+                    return raise_dumps_exception(Cow::Borrowed(
+                        "loads() got multiple values for argument: 'lists_to_tuples'",
+                    ));
+                }
+                lists_as_tuples = Some(NonNull::new_unchecked(*args.offset(num_args + i)));
+            } else {
+                return raise_dumps_exception(Cow::Borrowed(
+                    "loads() got an unexpected keyword argument",
+                ));
+            }
+        }
+    }
+
+    let to_tuples = match lists_as_tuples {
+	Some(val) => {
+	    if val.as_ptr() == Py_True() {
+		true
+	    } else {
+		false
+	    }
+	},
+	_ => false
+    };
+
+    match crate::deserialize::deserialize(*args,  to_tuples) {
+        Ok(val) => val.as_ptr(),
+        Err(err) => raise_loads_exception(Cow::Owned(err)),
+    }
+
+}
+
+#[cfg(not(python37))]
+#[no_mangle]
+pub unsafe extern "C" fn loads(
+    _self: *mut PyObject,
+    args: *mut PyObject,
+    kwds: *mut PyObject,
+) -> *mut PyObject {
+
+    let mut lists_as_tuples: Option<NonNull<PyObject>> = None;
+
+    let num_args = PyTuple_GET_SIZE(args);
+    if unlikely!(num_args == 0) {
+        return raise_dumps_exception(Cow::Borrowed(
+            "loads() missing 1 required positional argument: 'obj'",
+        ));
+    }
+    if num_args & 2 == 2 {
+        lists_as_tuples = Some(NonNull::new_unchecked(PyTuple_GET_ITEM(args, 1)));
+    }
+
+    if !kwds.is_null() {
+        let len = unsafe { crate::ffi::PyDict_GET_SIZE(kwds) as usize };
+        let mut pos = 0isize;
+        let mut arg: *mut PyObject = std::ptr::null_mut();
+        let mut val: *mut PyObject = std::ptr::null_mut();
+        for _ in 0..=len - 1 {
+            unsafe { _PyDict_Next(kwds, &mut pos, &mut arg, &mut val, std::ptr::null_mut()) };
+            if arg == typeref::LISTS_AS_TUPLES {
+                if unlikely!(num_args & 2 == 2) {
+                    return raise_dumps_exception(Cow::Borrowed(
+                        "loads() got multiple values for argument: 'lists_as_tuples'",
+                    ));
+                }
+                lists_as_tuples = Some(NonNull::new_unchecked(val));
+            } else if arg.is_null() {
+                break;
+            } else {
+                return raise_dumps_exception(Cow::Borrowed(
+                    "loads() got an unexpected keyword argument",
+                ));
+            }
+        }
+    }
+
+    let to_tuples = match lists_as_tuples {
+	Some(val) => {
+	    if val.as_ptr() == Py_True() {
+		true
+	    } else {
+		false
+	    }
+	},
+	_ => false
+    };
+
+    match crate::deserialize::deserialize(PyTuple_GET_ITEM(args, 0), to_tuples) {
+        Ok(val) => val.as_ptr(),
+        Err(err) => raise_loads_exception(Cow::Owned(err)),
     }
 }

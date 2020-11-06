@@ -56,6 +56,7 @@ pub static mut VALUE_STR: *mut PyObject = 0 as *mut PyObject;
 pub static mut STR_HASH_FUNCTION: Option<hashfunc> = None;
 pub static mut DEFAULT: *mut PyObject = 0 as *mut PyObject;
 pub static mut OPTION: *mut PyObject = 0 as *mut PyObject;
+pub static mut LISTS_AS_TUPLES: *mut PyObject = 0 as *mut PyObject;
 
 #[allow(non_upper_case_globals)]
 pub static mut JsonEncodeError: *mut PyObject = 0 as *mut PyObject;
@@ -105,6 +106,7 @@ pub fn init_typerefs() {
         HASH_SEED = (VALUE_STR as u64).wrapping_mul(DICT_TYPE as u64);
         DEFAULT = PyUnicode_InternFromString("default\0".as_ptr() as *const c_char);
         OPTION = PyUnicode_InternFromString("option\0".as_ptr() as *const c_char);
+	LISTS_AS_TUPLES = PyUnicode_InternFromString("lists_as_tuples\0".as_ptr() as *const c_char);
         JsonEncodeError = pyo3::ffi::PyExc_TypeError;
         JsonDecodeError = look_up_json_exc();
     });
